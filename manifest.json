@@ -1,0 +1,13 @@
+{
+  "manifest_version": 3,
+  "name": "UEAB iCampus Class Highlights",
+  "version": "1.0",
+  "description": "Highlights and summarizes your classes on iCampus.",
+  "content_scripts": [
+    {
+      "matches": ["https://icampus.ueab.ac.ke/iStudent/Auth/Classes/TimeTa*"],
+      "js": ["content.js"],
+      "run_at": "document_idle"
+    }
+  ]
+}
