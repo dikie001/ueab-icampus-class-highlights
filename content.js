@@ -1,178 +1,349 @@
 (function () {
-  const STORAGE_KEY = "classHighlighterEnabled";
+  "use strict";
 
-  const table = document.querySelector("#mainContent_grdClasses");
-  if (!table) {
-    console.error("Table not found");
-    return;
-  }
+  // Configuration
+  const CONFIG = {
+    storageKey: "classHighlighterEnabled",
+    tableSelector: "#mainContent_grdClasses",
+    updateInterval: 60 * 1000, // 1 minute
+    dayNames: ["sun", "mon", "tue", "wed", "thu", "fri", "sat"],
+    colors: {
+      upcoming: { text: "#b71c1c", bg: "#ffcdd2" },
+      ongoing: { text: "#1b5e20", bg: "#c8e6c9" },
+      ended: { text: "#e65100", bg: "#ffe0b2" },
+      banner: {
+        upcoming: { text: "#856404", bg: "#fff3cd", border: "#856404" },
+        none: { text: "#155724", bg: "#d4edda", border: "#155724" },
+      },
+    },
+  };
 
-  const rows = Array.from(table.querySelectorAll("tbody tr")).slice(1); // skip header
-  const today = new Date();
-  const dayNames = ["sun", "mon", "tue", "wed", "thu", "fri", "sat"];
-  const todayName = dayNames[today.getDay()];
+  // State management
+  const state = {
+    enabled: localStorage.getItem(CONFIG.storageKey) !== "false",
+    timer: null,
+    elements: {
+      table: null,
+      toggleBtn: null,
+      summaryBanner: null,
+      rows: [],
+    },
+  };
 
-  // Insert toggle button
-  let toggleBtn = document.querySelector("#class-toggle-btn");
-  if (!toggleBtn) {
-    toggleBtn = document.createElement("button");
-    toggleBtn.id = "class-toggle-btn";
-    toggleBtn.type = "button";
-    toggleBtn.innerText = "⏸ Hide Class Highlights";
-    toggleBtn.style.margin = "10px";
-    toggleBtn.style.padding = "6px 12px";
-    toggleBtn.style.fontWeight = "bold";
-    toggleBtn.style.border = "1px solid #333";
-    toggleBtn.style.borderRadius = "6px";
-    toggleBtn.style.cursor = "pointer";
-    toggleBtn.style.backgroundColor = "#007bff";
-    toggleBtn.style.color = "#fff";
-    table.parentNode.insertBefore(toggleBtn, table);
-  }
+  // Utility functions
+  const utils = {
+    formatDuration(ms) {
+      const totalMinutes = Math.abs(Math.floor(ms / 60000));
+      const hours = Math.floor(totalMinutes / 60);
+      const minutes = totalMinutes % 60;
+      return hours > 0 ? `${hours}h ${minutes}m` : `${minutes}m`;
+    },
 
-  // Insert summary banner
-  let summaryBanner = document.querySelector("#class-summary-banner");
-  if (!summaryBanner) {
-    summaryBanner = document.createElement("div");
-    summaryBanner.id = "class-summary-banner";
-    summaryBanner.className = "class-highlighter-added";
-    summaryBanner.style.padding = "12px";
-    summaryBanner.style.margin = "12px 0";
-    summaryBanner.style.border = "2px solid #333";
-    summaryBanner.style.borderRadius = "8px";
-    summaryBanner.style.fontWeight = "bold";
-    summaryBanner.style.fontSize = "16px";
-    summaryBanner.style.backgroundColor = "#f8f9fa";
-    summaryBanner.style.color = "#000";
-    table.parentNode.insertBefore(summaryBanner, table);
-  }
+    parseTime(timeStr) {
+      const [hours, minutes] = timeStr.trim().split(":").map(Number);
+      if (isNaN(hours) || isNaN(minutes)) return null;
+      const date = new Date();
+      date.setHours(hours, minutes, 0, 0);
+      return date;
+    },
 
-  let enabled = localStorage.getItem(STORAGE_KEY) !== "false"; // default = true
-  let timer = null;
+    getTodayName() {
+      return CONFIG.dayNames[new Date().getDay()];
+    },
 
-  function formatDuration(ms) {
-    const totalMinutes = Math.abs(Math.floor(ms / 60000));
-    const hours = Math.floor(totalMinutes / 60);
-    const minutes = totalMinutes % 60;
-    if (hours > 0) {
-      return `${hours} hr ${minutes} min`;
-    }
-    return `${minutes} min`;
-  }
+    classHasToday(daysText, todayName) {
+      return daysText.toLowerCase().includes(todayName);
+    },
+  };
 
-  function updateHighlights() {
-    if (!enabled) return;
+  // UI creation functions
+  const ui = {
+    createToggleButton() {
+      const btn = document.createElement("button");
+      btn.id = "class-toggle-btn";
+      btn.type = "button";
+      btn.style.cssText = `
+        margin: 10px 10px 0 10px;
+        padding: 8px 16px;
+        font-weight: 600;
+        font-size: 14px;
+        border: none;
+        border-radius: 6px;
+        cursor: pointer;
+        transition: all 0.2s ease;
+        box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+      `;
+      btn.onmouseenter = () => (btn.style.transform = "translateY(-1px)");
+      btn.onmouseleave = () => (btn.style.transform = "translateY(0)");
+      return btn;
+    },
 
-    let upcomingClass = null;
+    createSummaryBanner() {
+      const banner = document.createElement("div");
+      banner.id = "class-summary-banner";
+      banner.className = "class-highlighter-added";
+      banner.style.cssText = `
+        padding: 14px;
+        margin: 12px 10px;
+        border: 2px solid;
+        border-radius: 8px;
+        font-weight: 600;
+        font-size: 15px;
+        box-shadow: 0 2px 6px rgba(0,0,0,0.08);
+        transition: all 0.3s ease;
+      `;
+      return banner;
+    },
 
-    rows.forEach((row) => {
+    createStatusLabel(text, color) {
+      const label = document.createElement("div");
+      label.className = "class-status class-highlighter-added";
+      label.style.cssText = `
+        font-size: 12px;
+        font-weight: 600;
+        color: ${color};
+        margin-top: 4px;
+        padding: 2px 6px;
+        border-radius: 4px;
+        display: inline-block;
+        background: rgba(255,255,255,0.5);
+      `;
+      label.innerText = text;
+      return label;
+    },
+
+    updateButtonState(enabled) {
+      const btn = state.elements.toggleBtn;
+      if (enabled) {
+        btn.innerText = "⏸ Hide Highlights";
+        btn.style.backgroundColor = "#007bff";
+        btn.style.color = "#fff";
+      } else {
+        btn.innerText = "▶ Show Highlights";
+        btn.style.backgroundColor = "#6c757d";
+        btn.style.color = "#fff";
+      }
+    },
+  };
+
+  // Core logic
+  const highlighter = {
+    getClassStatus(startDate, endDate, now) {
+      if (now < startDate) {
+        return {
+          type: "upcoming",
+          text: `Starts in ${utils.formatDuration(startDate - now)}`,
+          ...CONFIG.colors.upcoming,
+        };
+      } else if (now <= endDate) {
+        return {
+          type: "ongoing",
+          text: `In Progress • ${utils.formatDuration(
+            endDate - now
+          )} remaining`,
+          ...CONFIG.colors.ongoing,
+        };
+      } else {
+        return {
+          type: "ended",
+          text: `Ended ${utils.formatDuration(now - endDate)} ago`,
+          ...CONFIG.colors.ended,
+        };
+      }
+    },
+
+    processRow(row, todayName, now) {
+      // Clear previous highlights
       row.style.backgroundColor = "";
       row.classList.remove("class-highlighter-highlight");
       row.querySelectorAll(".class-status").forEach((el) => el.remove());
 
-      const daysText = row.cells[6].innerText.toLowerCase();
-      if (daysText.includes(todayName)) {
-        const startTime = row.cells[7].innerText.trim();
-        const endTime = row.cells[8].innerText.trim();
+      const cells = row.cells;
+      if (!cells || cells.length < 9) return null;
 
-        const [sh, sm] = startTime.split(":").map(Number);
-        const [eh, em] = endTime.split(":").map(Number);
+      const daysText = cells[6].innerText;
+      if (!utils.classHasToday(daysText, todayName)) return null;
 
-        const startDate = new Date(today);
-        startDate.setHours(sh, sm, 0, 0);
+      const startDate = utils.parseTime(cells[7].innerText);
+      const endDate = utils.parseTime(cells[8].innerText);
 
-        const endDate = new Date(today);
-        endDate.setHours(eh, em, 0, 0);
+      if (!startDate || !endDate) return null;
 
-        const now = new Date();
-        let text = "";
-        let color = "";
-        let bgColor = "";
+      const status = this.getClassStatus(startDate, endDate, now);
 
-        if (now < startDate) {
-          text = `Starts in ${formatDuration(startDate - now)}`;
-          color = "#b71c1c"; // deep red text
-          bgColor = "#ffcdd2"; // light red background
-          if (!upcomingClass || startDate < upcomingClass.startDate) {
-            upcomingClass = { row, startDate, course: row.cells[2].innerText };
+      // Apply styling
+      row.style.backgroundColor = status.bg;
+      row.style.transition = "background-color 0.3s ease";
+
+      // Add status label
+      const statusLabel = ui.createStatusLabel(status.text, status.text);
+      cells[2].appendChild(statusLabel);
+
+      // Return info if upcoming
+      if (status.type === "upcoming") {
+        return {
+          row,
+          startDate,
+          course: cells[2].innerText.split("\n")[0].trim(),
+          location: cells[5].innerText.trim(),
+        };
+      }
+
+      return null;
+    },
+
+    updateAll() {
+      if (!state.enabled) return;
+
+      const now = new Date();
+      const todayName = utils.getTodayName();
+      let upcomingClasses = [];
+
+      state.elements.rows.forEach((row) => {
+        const upcoming = this.processRow(row, todayName, now);
+        if (upcoming) upcomingClasses.push(upcoming);
+      });
+
+      // Sort by start time
+      upcomingClasses.sort((a, b) => a.startDate - b.startDate);
+      this.updateBanner(upcomingClasses[0]);
+    },
+
+    updateBanner(nextClass) {
+      const banner = state.elements.summaryBanner;
+      if (!banner) return;
+
+      if (nextClass) {
+        const timeUntil = utils.formatDuration(
+          nextClass.startDate - new Date()
+        );
+        banner.innerHTML = `
+          <span style="font-size: 18px;">📌</span> 
+          <strong>Next:</strong> ${nextClass.course} 
+          <span style="opacity: 0.8;">in ${timeUntil}</span>
+          ${
+            nextClass.location
+              ? ` • <span style="opacity: 0.7;">${nextClass.location}</span>`
+              : ""
           }
-        } else if (now >= startDate && now <= endDate) {
-          text = `Ongoing (${formatDuration(endDate - now)} left)`;
-          color = "#1b5e20"; // dark green text
-          bgColor = "#c8e6c9"; // light green background
-        } else {
-          text = `Ended (${formatDuration(now - endDate)} ago)`;
-          color = "#e65100"; // deep orange text
-          bgColor = "#ffe0b2"; // light orange background
+        `;
+        Object.assign(banner.style, {
+          backgroundColor: CONFIG.colors.banner.upcoming.bg,
+          color: CONFIG.colors.banner.upcoming.text,
+          borderColor: CONFIG.colors.banner.upcoming.border,
+        });
+      } else {
+        banner.innerHTML =
+          '<span style="font-size: 18px;">✅</span> <strong>All done for today!</strong>';
+        Object.assign(banner.style, {
+          backgroundColor: CONFIG.colors.banner.none.bg,
+          color: CONFIG.colors.banner.none.text,
+          borderColor: CONFIG.colors.banner.none.border,
+        });
+      }
+    },
+
+    clear() {
+      document.querySelectorAll(".class-highlighter-added").forEach((el) => {
+        if (el.id !== "class-toggle-btn") el.remove();
+      });
+      state.elements.rows.forEach((row) => {
+        row.style.backgroundColor = "";
+        row.classList.remove("class-highlighter-highlight");
+      });
+    },
+  };
+
+  // State controller
+  const controller = {
+    setEnabled(enabled) {
+      state.enabled = enabled;
+      localStorage.setItem(CONFIG.storageKey, String(enabled));
+
+      // Clear existing timer
+      if (state.timer) {
+        clearInterval(state.timer);
+        state.timer = null;
+      }
+
+      if (enabled) {
+        ui.updateButtonState(true);
+
+        // Re-add banner if needed
+        if (!document.body.contains(state.elements.summaryBanner)) {
+          state.elements.table.parentNode.insertBefore(
+            state.elements.summaryBanner,
+            state.elements.table
+          );
         }
 
-        // Apply row highlight
-        row.style.backgroundColor = bgColor;
+        highlighter.updateAll();
+        state.timer = setInterval(
+          () => highlighter.updateAll(),
+          CONFIG.updateInterval
+        );
+      } else {
+        ui.updateButtonState(false);
+        highlighter.clear();
 
-        // Add inline status
-        const status = document.createElement("div");
-        status.className = "class-status class-highlighter-added";
-        status.style.fontSize = "13px";
-        status.style.fontWeight = "bold";
-        status.style.color = color;
-        status.innerText = text;
-        row.cells[2].appendChild(status);
+        if (
+          state.elements.summaryBanner &&
+          document.body.contains(state.elements.summaryBanner)
+        ) {
+          state.elements.summaryBanner.remove();
+        }
       }
-    });
+    },
 
-    // Update summary banner
-    if (upcomingClass) {
-      summaryBanner.innerText = `📌 Up Next: ${
-        upcomingClass.course
-      } (starts in ${formatDuration(upcomingClass.startDate - new Date())})`;
-      summaryBanner.style.backgroundColor = "#fff3cd";
-      summaryBanner.style.color = "#856404";
-      summaryBanner.style.borderColor = "#856404";
-    } else {
-      summaryBanner.innerText = "✅ No more classes today";
-      summaryBanner.style.backgroundColor = "#d4edda";
-      summaryBanner.style.color = "#155724";
-      summaryBanner.style.borderColor = "#155724";
+    toggle() {
+      this.setEnabled(!state.enabled);
+    },
+  };
+
+  // Initialization
+  function init() {
+    // Find table
+    const table = document.querySelector(CONFIG.tableSelector);
+    if (!table) {
+      console.error("Class table not found");
+      return;
     }
+
+    state.elements.table = table;
+    state.elements.rows = Array.from(table.querySelectorAll("tbody tr")).slice(
+      1
+    );
+
+    if (state.elements.rows.length === 0) {
+      console.warn("No class rows found");
+      return;
+    }
+
+    // Create or find UI elements
+    state.elements.toggleBtn =
+      document.querySelector("#class-toggle-btn") || ui.createToggleButton();
+    state.elements.summaryBanner =
+      document.querySelector("#class-summary-banner") ||
+      ui.createSummaryBanner();
+
+    // Insert elements if new
+    if (!document.body.contains(state.elements.toggleBtn)) {
+      table.parentNode.insertBefore(state.elements.toggleBtn, table);
+    }
+
+    // Attach event handler
+    state.elements.toggleBtn.onclick = () => controller.toggle();
+
+    // Start
+    controller.setEnabled(state.enabled);
+
+    console.log("Class Highlighter initialized successfully");
   }
 
-  function clearHighlights() {
-    document.querySelectorAll(".class-highlighter-added").forEach((el) => {
-      if (el.id !== "class-summary-banner") el.remove();
-    });
-    rows.forEach((row) => {
-      row.style.backgroundColor = "";
-      row.classList.remove("class-highlighter-highlight");
-    });
+  // Run initialization
+  if (document.readyState === "loading") {
+    document.addEventListener("DOMContentLoaded", init);
+  } else {
+    init();
   }
-
-  function setEnabled(state) {
-    enabled = state;
-    localStorage.setItem(STORAGE_KEY, state);
-    if (timer) {
-      clearInterval(timer);
-      timer = null;
-    }
-    if (enabled) {
-      toggleBtn.innerText = "⏸ Hide Class Highlights";
-      toggleBtn.style.backgroundColor = "#007bff";
-      if (!document.body.contains(summaryBanner)) {
-        table.parentNode.insertBefore(summaryBanner, table);
-      }
-      updateHighlights();
-      timer = setInterval(updateHighlights, 60 * 1000);
-    } else {
-      toggleBtn.innerText = "▶ Show Class Highlights";
-      toggleBtn.style.backgroundColor = "#6c757d";
-      clearHighlights();
-      if (summaryBanner && document.body.contains(summaryBanner)) {
-        summaryBanner.remove();
-      }
-    }
-  }
-
-  toggleBtn.onclick = () => setEnabled(!enabled);
-
-  // Initial run
-  setEnabled(enabled);
 })();
